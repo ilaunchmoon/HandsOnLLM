@@ -28,9 +28,9 @@ class RotatePosEmbedding:
         self.max_seq_len = max_seq_len      # 支持的最大序列长度
         self.theta = theta                  # 频率调节参数, 默认为10000.0
         self.device = device                # 默认设备
-        self._precompute_freqs_cis()        # 调用预先计算的复数形式的旋转向量
+        self.precompute_freqs_cis()        # 调用预先计算的复数形式的旋转向量
     
-    def _precompute_freqs_cis(self)->None:  # 预先计算好复数形式的旋转向量
+    def precompute_freqs_cis(self)->torch.Tensor:  # 预先计算好复数形式的旋转向量
         # 1.0 / (10000.0 ^ (2i / dim)): i是每一个token向量的维度索引
         # freqs: (self.dim//2): 旋转角度
         freqs = 1.0 / (self.theta ** (torch.arange(0, self.dim, 2, device=self.device)[:self.dim//2].float() / self.dim))
@@ -47,9 +47,10 @@ class RotatePosEmbedding:
         # torch.polar()会依据模长和旋转角度生成一个复数, 由于模长为1, 则代表单位复数
         # self.freqs_cis中每一元素为: e^(i * 旋转角度) = cos(旋转角度) + isin(旋转角度)
         self.freqs_cis = torch.polar(torch.ones_like(freqs), freqs)
+        return self.freqs_cis
 
     
-    def _reshape_cis_broadcast(self, x:torch.Tensor)->torch.Tensor:
+    def reshape_cis_broadcast(self, x:torch.Tensor)->torch.Tensor:
         # 获取x的第1个维度长度, 即序列长度
         seq_len = x.size(1)     
         # 获取x的维度总数
@@ -74,7 +75,7 @@ class RotatePosEmbedding:
         xk_complex = torch.view_as_complex(xk.float().reshape(*xk.shape[:-1], -1, 2))
 
         # 获取旋转张量的形状
-        freq_cis = self._reshape_cis_broadcast(xq_complex)
+        freq_cis = self.reshape_cis_broadcast(xq_complex)
 
         # 应用旋转矩阵, 并且将倒数第2个维度压缩
         # 因为从复数形式转为实数形式, 最后一个维度会重新扩展开, 并且这个维度的长度为2
@@ -98,6 +99,7 @@ class V1ModelArgs:
 
 class V1Attention(nn.Module):
     def __init__(self, config:V1ModelArgs)->None:
+        super().__init__()
         self.dim = config.dim                           # 隐藏层维度
         self.n_heads = config.n_heads                   # 注意力头数
         self.head_dim = config.dim // config.n_heads    # 注意力头的隐藏层维度
@@ -122,6 +124,8 @@ class V1Attention(nn.Module):
             self.head_dim
         )
 
+        self.pos_emb = RotatePosEmbedding(config.dim, config.max_seq_len)
+
 
     def forward(self, x: torch.Tensor, 
                 start_pos:int,
@@ -137,10 +141,113 @@ class V1Attention(nn.Module):
         x_k = x_k.view(batch_size, seq_len, self.n_heads, self.head_dim)        
         x_v = x_v.view(batch_size, seq_len, self.n_heads, self.head_dim)
 
-        self.cache_k = self.cache_k.to(x_q)
-        self.cache_v = self.cache_v.to(x_q)
+        x_q, x_k = self.pos_emb(x_q, x_k, freqs_cis=freqs_cis)                  # 对q、k添加旋转位置编码
 
+        self.cache_k = self.cache_k.to(x_q)                                     # 对k、v进行缓存
+        self.cache_v = self.cache_v.to(x_q)
         
+        self.cache_k[:batch_size, :start_pos + seq_len] = x_k                   # start_pos + seq_len的缓存部分
+        self.cache_v[:batch_size, :start_pos + seq_len] = x_v 
+
+        keys = self.cache_k[:batch_size, :start_pos + seq_len]                  # 取出新添加的seq_len之前, 直接取出之前的kv缓存
+        values = seq_len.cache_v[:batch_size, :start_pos + seq_len]
+
+        # 计算注意力得分
+        xq = xq.transpose(1, 2)             # 注意得分计算先将q、k、v转置为: (batch_size, n_head, seq_len, head_dim)即对非批次维度(最后两个维度)进行矩阵乘法运算
+        keys = keys.transpose(1, 2)
+        values = values.transpose(1, 2)
+        scores= torch.matmul(keys, keys.transpose(-2, -1)) / math.sqrt(self.head_dim)
+        if mask is not None:                # 掩码操作
+            scores = scores + mask
+        scores = F.softmax(scores.float(), dim=-1).type_as(xq)  # (batch_size, n_head, seq_len, seq_len)
+        # 其实对于分数scores可以使用droput
+        output = torch.matmul(scores, values)                   # (batch_size, n_head, seq_len, head_dim)
+        output = output.transpose(1, 2).contiguous().view(batch_size, seq_len, -1)      # 合并多头注意力机制: [batch_size, seq_len, hidden_dim]
+        return self.w_out(output)                               # 输出前的线性层的映射
+
+    
+
+# 解码器中的前馈层
+class FeedForward(nn.Module):
+    def __init__(self, dim:int, hidden_dim:int)->None:
+        super().__init__()
+        self.linear1 = nn.Linear(dim, hidden_dim)
+        self.linear2 = nn.Linear(hidden_dim, dim)
+        self.linear3 = nn.Linear(dim, hidden_dim)
+    
+    def forward(self, x:torch.Tensor)->torch.Tensor:
+        activate_value = F.silu(self.linear1(x))
+        tmp = activate_value * self.linear3(x)
+        return self.linear2(tmp)
+
+
+
+class TransformerBlock(nn.Module):
+    def __init__(self, 
+                layer_id:int,               # 注意力机制层id
+                arags:V1ModelArgs)->None:
+        super().__init__()
+        self.n_heads = arags.n_heads        # 注意力头数            
+        self.dim = arags.dim                # 隐藏层维度
+        self.head_dim = arags.dim // arags.n_heads      # 注意力头的维度
+        self.attention = V1Attention(config=arags)      # 注意力机制层
+        self.feed_net = FeedForward(self.dim, hidden_dim=4 * self.dim)      # 前馈层先升维为原来的4倍, 再降为原来的维度
+        self.layer_id = layer_id
+        self.attention_norm = RMSNorm(arags.dim, eps=arags.norm_eps)        # 解码器中注意力层的归一化层, 原始的transformer中归一化是使用的层归一化
+        self.ffn_norm = RMSNorm(arags.dim, eps=arags.norm_eps)              # 解码器中前馈层的归一化层, 原始的transformer中归一化是使用的层归一化
+
+    
+    def forward(self, 
+                x:torch.Tensor, 
+                start_pos:int, 
+                freqs_cis:torch.Tensor, 
+                mask:Optional[torch.Tensor])->torch.Tensor:
+        h = x + self.attention.forward(self.attention_norm(x), start_pos, freqs_cis, mask)  # 注意力计算, x + 代表残差连接
+        out = h + self.feed_net.forward(self.ffn_norm(h))                                   # 前馈层计算
+        return out 
+
+
+class Transformer(nn.Module):
+    def __init__(self, args:V1ModelArgs) -> None:
+        super().__init__()
+        self.args = args
+        self.vocab_size = args.vocab_size           # 词汇表大小
+        self.n_layers = args.n_layers               # 解码器的层数
+        self.token_embedding = nn.Linear(args.vocab_size, args.dim)     # 位置编码
+        self.layers = torch.nn.ModuleList()
+        for layer_id in range(self.n_layers):
+            self.layers.append(TransformerBlock(layer_id, args))        # 创建n层解码器模块
+        
+        self.norm = RMSNorm(args.dim, eps=args.norm_eps)                # 归一化
+        self.output = nn.Linear(args.dim, args.vocab_size)              # 输出层, 从hidden_dim映射会词汇表的大小
+        self.freq_cis_tmp = RotatePosEmbedding(args.dim, args.max_seq_len)
+        self.freq_cis = self.freq_cis_tmp.precompute_freqs_cis()        # 调用预计算后的频率值
+
+    
+    def forward(self, token:torch.Tensor, start_pos:int)->float:
+        _, seq_len = token.shape                                        # 获取token的序列长度
+        h = self.token_embedding(token)                                 # 对token进行位置编码
+        self.freq_cis = self.freq_cis.to(h.device)                      # 将预先计算的频率转移到和h同一个device上
+        freq_cis = self.freq_cis[start_pos:start_pos + seq_len]         # 由于是token by token的过程, 所以后一个token在前面token基础上继续预测的, 则从start_pos + 新输入的seq_len长的序列
+        mask = None
+        if seq_len > 1:                                                 # 如果新输入token序列seq_len长度大于1, 说明后面的需要使用掩码遮蔽, 则需要构建mask矩阵
+            mask = torch.fill((1, 1, seq_len, seq_len), float("-inf"), device=token.device)     # 
+            mask = torch.triu(mask, diagonal=start_pos + 1).type_as(h)
+
+        for layer in self.layers:
+            h = layer(h, start_pos, freq_cis, mask)
+
+        h = self.norm(h)
+        out = self.output(h[:, -1, :])                                  # 输出最后一个序列, 因为是token by token的过程
+        return out.float()
+
+
+
+
+
+
+
+
 
 
     
