@@ -84,7 +84,63 @@ class RotatePosEmbedding:
         return xq_rotate.type_as(xq), xk_rotate.type_as(xk)
     
 
+@dataclass
+class V1ModelArgs:
+    dim:int = 512
+    n_layers: int = 8
+    n_heads: int = 8
+    vocab_size: int = -1        # 词汇表大小
+    norm_eps:float = 1e-5
 
+    max_batch_size: int = 32
+    max_seq_len = 2048
+
+
+class V1Attention(nn.Module):
+    def __init__(self, config:V1ModelArgs)->None:
+        self.dim = config.dim                           # 隐藏层维度
+        self.n_heads = config.n_heads                   # 注意力头数
+        self.head_dim = config.dim // config.n_heads    # 注意力头的隐藏层维度
+
+        self.w_q = nn.Linear(self.dim, self.dim)        # q权重
+        self.w_k = nn.Linear(self.dim, self.dim)        # k权重
+        self.w_v = nn.Linear(self.dim, self.dim)        # v权重
+
+        self.w_out = nn.Linear(self.dim, self.dim)      # 输出映射权重
+
+        self.cache_k = torch.zeros(                     # k cache
+            config.max_batch_size,
+            config.max_seq_len,
+            self.n_heads,
+            self.head_dim
+        )
+
+        self.cache_v = torch.zeros(                     # v cache
+            config.max_batch_size,
+            config.max_seq_len,
+            self.n_heads,
+            self.head_dim
+        )
+
+
+    def forward(self, x: torch.Tensor, 
+                start_pos:int,
+                freqs_cis:torch.Tensor,
+                mask:Optional[torch.Tensor]
+                )->torch.Tensor:
+        batch_size, seq_len, _ = x.shape            # 获取词嵌入向量的维度信息: [batch_size, seq_len, hidden_dim]
+        x_q = self.w_q(x)                           # 获取Q、K、V矩阵: [batch_size, seq_len, hidden_dim], 要将最后一个维度分成多个头
+        x_k = self.w_k(x)   
+        x_v = self.w_v(x)
+
+        x_q = x_q.view(batch_size, seq_len, self.n_heads, self.head_dim)        # 转变Q、K、V的张量形状, 便于进行多头注意力计算: [batch_size, seq_len, hidden_dim] ---> [batch_size, seq_len, n_head, head_dim]
+        x_k = x_k.view(batch_size, seq_len, self.n_heads, self.head_dim)        
+        x_v = x_v.view(batch_size, seq_len, self.n_heads, self.head_dim)
+
+        self.cache_k = self.cache_k.to(x_q)
+        self.cache_v = self.cache_v.to(x_q)
+
+        
 
 
     
