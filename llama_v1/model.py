@@ -94,7 +94,7 @@ class V1ModelArgs:
     norm_eps:float = 1e-5
 
     max_batch_size: int = 32
-    max_seq_len = 2048
+    max_seq_len: int = 2048
 
 
 class V1Attention(nn.Module):
@@ -141,7 +141,7 @@ class V1Attention(nn.Module):
         x_k = x_k.view(batch_size, seq_len, self.n_heads, self.head_dim)        
         x_v = x_v.view(batch_size, seq_len, self.n_heads, self.head_dim)
 
-        x_q, x_k = self.pos_emb(x_q, x_k, freqs_cis=freqs_cis)                  # 对q、k添加旋转位置编码
+        x_q, x_k = self.pos_emb.apply_rotary_embed(x_q, x_k)                  # 对q、k添加旋转位置编码
 
         self.cache_k = self.cache_k.to(x_q)                                     # 对k、v进行缓存
         self.cache_v = self.cache_v.to(x_q)
@@ -150,13 +150,13 @@ class V1Attention(nn.Module):
         self.cache_v[:batch_size, :start_pos + seq_len] = x_v 
 
         keys = self.cache_k[:batch_size, :start_pos + seq_len]                  # 取出新添加的seq_len之前, 直接取出之前的kv缓存
-        values = seq_len.cache_v[:batch_size, :start_pos + seq_len]
+        values = self.cache_v[:batch_size, :start_pos + seq_len]
 
         # 计算注意力得分
-        xq = xq.transpose(1, 2)             # 注意得分计算先将q、k、v转置为: (batch_size, n_head, seq_len, head_dim)即对非批次维度(最后两个维度)进行矩阵乘法运算
+        xq = x_q.transpose(1, 2)             # 注意得分计算先将q、k、v转置为: (batch_size, n_head, seq_len, head_dim)即对非批次维度(最后两个维度)进行矩阵乘法运算
         keys = keys.transpose(1, 2)
         values = values.transpose(1, 2)
-        scores= torch.matmul(keys, keys.transpose(-2, -1)) / math.sqrt(self.head_dim)
+        scores= torch.matmul(xq, keys.transpose(-2, -1)) / math.sqrt(self.head_dim)
         if mask is not None:                # 掩码操作
             scores = scores + mask
         scores = F.softmax(scores.float(), dim=-1).type_as(xq)  # (batch_size, n_head, seq_len, seq_len)
@@ -231,7 +231,7 @@ class Transformer(nn.Module):
         freq_cis = self.freq_cis[start_pos:start_pos + seq_len]         # 由于是token by token的过程, 所以后一个token在前面token基础上继续预测的, 则从start_pos + 新输入的seq_len长的序列
         mask = None
         if seq_len > 1:                                                 # 如果新输入token序列seq_len长度大于1, 说明后面的需要使用掩码遮蔽, 则需要构建mask矩阵
-            mask = torch.fill((1, 1, seq_len, seq_len), float("-inf"), device=token.device)     # 
+            mask = torch.full((1, 1, seq_len, seq_len), float("-inf"), device=token.device)     # 
             mask = torch.triu(mask, diagonal=start_pos + 1).type_as(h)
 
         for layer in self.layers:

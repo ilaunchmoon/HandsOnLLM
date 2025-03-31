@@ -10,9 +10,9 @@ class Tokenizer():
         """
         self.sp_model = SentencePieceProcessor(path)    # 初始化词元化模型
         self.n_words:int = self.sp_model.vocab_size()   # 词汇表大小
-        self.bos_id = self.token_model.bos_id()         # 开始标识符token id
-        self.eos_id = self.token_model.eos_id()         # 结束标识符token id
-        self.pad_id = self.token_model.pad_id()         # 用于填充符的token id
+        self.bos_id = self.sp_model.bos_id()         # 开始标识符token id
+        self.eos_id = self.sp_model.eos_id()         # 结束标识符token id
+        self.pad_id = self.sp_model.pad_id()         # 用于填充符的token id
 
     def encode(self, s:str, bos:bool, eos:bool)->List[int]:
         """
