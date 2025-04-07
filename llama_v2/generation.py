@@ -62,7 +62,7 @@ class Llama:
             AssertionError: 如果指定目录中没有检查点文件
 
         注意:
-            此方法设置设备为CUDA, 并加载预训练模型和分词器
+            此方法设置设备为默认为CUDA, 也可更改为cpu, 并加载预训练模型和分词器
         """
         # 设置设备
         torch.cuda.set_device(0)
@@ -125,19 +125,28 @@ class Llama:
             此方法使用提供的提示作为生成文本的基础。它使用核采样来产生具有可控随机性的文本
             如果logprobs为True, 则计算每个生成词元的对数概率
         """
-        params = self.model.params
-        bsz = len(prompt_tokens)
-        assert bsz <= params.max_batch_size, (bsz, params.max_batch_size)
+        params = self.model.params                                                      # 模型参数
+        bsz = len(prompt_tokens)                                                        # 输入的提示词的批次数
+        assert bsz <= params.max_batch_size, (bsz, params.max_batch_size)               # 验证当前输入prompts的长度小于等于模型最大处理长度, 如果不是小于等于, 则会抛出以元组形式(batch_size, params.max_batch_size)异常信息 
 
-        min_prompt_len = min(len(t) for t in prompt_tokens)
+        # 调用token模型的编码器对输入的prompt进行编码操作
+        # prompt_token其实就是输入进来的prompts经过编码之后的token id
+        min_prompt_len = min(len(t) for t in prompt_tokens)                             
         max_prompt_len = max(len(t) for t in prompt_tokens)
+
+        # 获取提示词编码之后最小的token序列长度和最大的token序列长度
         assert max_prompt_len <= params.max_seq_len
+
+        # 获取当前能够处理的最大序列长度: 在模型能够处理的最大长度与输入最大长度加最大提示词长度的和 之间取最小值
+        # 主要目的就是为了防止模型处理超过它最大处理长度的部分        
         total_len = min(params.max_seq_len, max_gen_len + max_prompt_len)
 
         pad_id = self.tokenizer.pad_id
+
+        # 预先生成一个存放token id的张量, 先将全部的原始都设为pad_id
         tokens = torch.full((bsz, total_len), pad_id, dtype=torch.long, device="cuda")
         for k, t in enumerate(prompt_tokens):
-            tokens[k, : len(t)] = torch.tensor(t, dtype=torch.long, device="cuda")
+            tokens[k, : len(t)] = torch.tensor(t, dtype=torch.long, device="cuda")          # 将tokens的第k个批次中的后len(t)个位置都设置为prompt_token的索引, 这里的t其实就是token的id
         if logprobs:
             token_logprobs = torch.zeros_like(tokens, dtype=torch.float)
 
@@ -208,8 +217,8 @@ class Llama:
             temperature (float, optional): 控制采样随机性的温度值, 默认为0.6
             top_p (float, optional): 核采样的概率阈值, 默认为0.9
             max_gen_len (Optional[int], optional): 生成补全序列的最大长度, 如果未提供, 则设置为模型的最大序列长度减1,
-            logprobs (bool, optional): 是否计算词元的对数概率。默认为False
-            echo (bool, optional): 是否在生成的输出中包含提示词元。默认为False
+            logprobs (bool, optional): 是否计算词元的对数概率, 默认为False
+            echo (bool, optional): 是否在生成的输出中包含提示词元, 默认为False
 
         返回:
             List[CompletionPrediction]: 补全预测列表，每个包含生成的文本补全
@@ -253,10 +262,10 @@ class Llama:
 
         参数:
             dialogs (List[Dialog]): 对话列表，每个对话是消息列表
-            temperature (float, optional): 控制采样随机性的温度值。默认为0.6
-            top_p (float, optional): 核采样的概率阈值。默认为0.9
+            temperature (float, optional): 控制采样随机性的温度值, 默认为0.6
+            top_p (float, optional): 核采样的概率阈值, 默认为0.9
             max_gen_len (Optional[int], optional): 生成回复序列的最大长度, 如果未提供, 则设置为模型的最大序列长度减1
-            logprobs (bool, optional): 是否计算词元的对数概率。默认为False
+            logprobs (bool, optional): 是否计算词元的对数概率, 默认为False
 
         返回:
             List[ChatPrediction]: 聊天预测列表，每个包含助手生成的回复
@@ -367,11 +376,11 @@ def sample_top_p(probs, p):
         Top-p采样选择累积概率质量超过阈值p的最小词元集
         分布基于所选词元重新归一化
     """
-    probs_sort, probs_idx = torch.sort(probs, dim=-1, descending=True)
-    probs_sum = torch.cumsum(probs_sort, dim=-1)
-    mask = probs_sum - probs_sort > p
-    probs_sort[mask] = 0.0
-    probs_sort.div_(probs_sort.sum(dim=-1, keepdim=True))
-    next_token = torch.multinomial(probs_sort, num_samples=1)
-    next_token = torch.gather(probs_idx, -1, next_token)
+    probs_sort, probs_idx = torch.sort(probs, dim=-1, descending=True)              # 将probs中的元素进行降序排列, 返回降序排列后的结果, 以及排序前各元素的索引
+    probs_sum = torch.cumsum(probs_sort, dim=-1)                                    # 将降序后的元素逐个累加, 如[0.4, 0.3, 0.2, 0.1] --> [0.4, 0.7, 0.9, 1.0]
+    mask = probs_sum - probs_sort > p                                               # 构建掩码矩阵: 若累积后概率向量元素减去排序后的对应位置元素还大于top_p, 则它需要被掩码为0, 便于后期取前top_p个
+    probs_sort[mask] = 0.0                                                          # 掩码操作
+    probs_sort.div_(probs_sort.sum(dim=-1, keepdim=True))                           # 掩码操作后, 归一化
+    next_token = torch.multinomial(probs_sort, num_samples=1)                       # 归一化, 再依赖于归一化后的概率分布随机采样一个样本
+    next_token = torch.gather(probs_idx, -1, next_token)                            # 通过原始probs的各元素索引, 在next_token的最后一个维度上收集元素, 并返回给next_token
     return next_token
