@@ -70,6 +70,8 @@ class GroupQueryAttention(nn.Module):
         q = q.view(batch_size, seq_len, self.num_kv_groups, self.heads_per_group, self.head_dim)
         q = q.permute(0, 2, 3, 1, 4)
         
+        # (batch_size, seq_len, num_kv_groups * head_dim) --> 将num_kv_groups * head_dim分裂成两个维度, 分别将num_kv_groups 和 head_dim 安置在倒数第2和倒数第1的维度上
+        # (batch_size, seq_len, num_kv_groups, head_dim)  --> 然后将第1个维度的seq_len和倒数第2个维度交换, 最后再在第2个维度上扩展一个维度
         # 键、值: (batch_size, num_kv_groups, 1, seq_len, head_dim)
         # 注意这里用unsqueeze(2)添加了一个维度，用于后续的广播
         k = k.permute(0, 2, 1, 3).unsqueeze(2)
@@ -96,6 +98,8 @@ class GroupQueryAttention(nn.Module):
         attn_output = torch.matmul(attn_weights, v)
         
         # 将输出重塑回原始维度
+        # (batch_size, num_kv_groups, heads_per_group, seq_len, head_dim) --> 将倒数第2个维度交换到第1个维度,
+        # (batch_size, seq_len, num_kv_groups, heads_per_group, head_dim) --> 合并第2、3、4个维度为一个维度, 即第三个维度的 hidden_dim
         # (batch_size, seq_len, hidden_dim)
         attn_output = attn_output.permute(0, 3, 1, 2, 4).contiguous()
         attn_output = attn_output.view(batch_size, seq_len, self.hidden_dim)
