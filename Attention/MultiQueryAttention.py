@@ -23,15 +23,15 @@ class GroupQueryAttention(nn.Module):
         
         self.hidden_dim = hidden_dim                      # 隐藏层维度
         self.num_heads = num_heads                        # 查询的注意力头总数 
-        self.num_kv_groups = num_kv_groups               # 键值组的数量
-        self.head_dim = hidden_dim // num_heads          # 每个注意力头的维度
-        self.heads_per_group = num_heads // num_kv_groups  # 每组中的查询头数量
-        self.scaling = 1.0 / math.sqrt(self.head_dim)    # 缩放因子，用于注意力分数的缩放
+        self.num_kv_groups = num_kv_groups                # 键值组的数量
+        self.head_dim = hidden_dim // num_heads           # 每个注意力头的维度
+        self.heads_per_group = num_heads // num_kv_groups # 每组中的查询头数量
+        self.scaling = 1.0 / math.sqrt(self.head_dim)     # 缩放因子，用于注意力分数的缩放
         
         # 为Q、K、V创建线性投影层
         self.q_proj = nn.Linear(hidden_dim, hidden_dim, bias=False)                         # 查询投影：维持全部头数
-        self.k_proj = nn.Linear(hidden_dim, self.num_kv_groups * self.head_dim, bias=False)  # 键投影：减少到组数对应的头数
-        self.v_proj = nn.Linear(hidden_dim, self.num_kv_groups * self.head_dim, bias=False)  # 值投影：减少到组数对应的头数
+        self.k_proj = nn.Linear(hidden_dim, self.num_kv_groups * self.head_dim, bias=False) # 键投影：减少到组数对应的头数
+        self.v_proj = nn.Linear(hidden_dim, self.num_kv_groups * self.head_dim, bias=False) # 值投影：减少到组数对应的头数
         self.out_proj = nn.Linear(hidden_dim, hidden_dim, bias=False)                       # 输出投影：恢复到原始维度
         
         self.dropout = nn.Dropout(dropout_rate)  # 用于注意力权重的dropout
@@ -63,7 +63,10 @@ class GroupQueryAttention(nn.Module):
         v = v.view(batch_size, seq_len, self.num_kv_groups, self.head_dim)
         
         # 重新排列维度以进行注意力计算
-        # 查询: (batch_size, num_kv_groups, heads_per_group, seq_len, head_dim)
+        # (batch_size, seq_len, hidden_dim) --> 将 hidden_dim 分裂为三个维度：num_kv_groups, heads_per_group, head_dim
+        # (batch_size, seq_len, num_kv_groups, heads_per_group, head_dim)--> 
+        # 然后将第1个维度的seq_len移动到倒数第2个维度, 然后num_kv_groups, heads_per_group分布安置在第1和第2个维度
+        # (batch_size, num_kv_groups, heads_per_group, seq_len, head_dim)
         q = q.view(batch_size, seq_len, self.num_kv_groups, self.heads_per_group, self.head_dim)
         q = q.permute(0, 2, 3, 1, 4)
         
