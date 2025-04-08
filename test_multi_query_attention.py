@@ -8,7 +8,7 @@
 import unittest
 import torch
 import torch.nn as nn
-from Attention.MultiQueryAttention import GroupQueryAttention
+from Attention.GoupQueryAttention import GroupQueryAttention
 
 class TestMultiQueryAttention(unittest.TestCase):
     def setUp(self):
