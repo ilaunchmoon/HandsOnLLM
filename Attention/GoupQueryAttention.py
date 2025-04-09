@@ -5,13 +5,13 @@ from typing import Optional
 import torch.nn.functional as F
 
 class GroupQueryAttention(nn.Module):
-    def __init__(self, hidden_dim, num_heads, num_kv_groups, dropout_rate=0.1):
+    def __init__(self, hidden_dim:int, num_heads:int, num_kv_groups:int, dropout_rate:float=0.1)->None:
         """
         初始化组查询注意力模块
         
         参数:
             hidden_dim (int): 隐藏层维度大小
-            num_heads (int): 查询的注意力头总数
+            num_heads (int): 查询的注意力头总
             num_kv_groups (int): 键值组的数量(必须能够被num_heads整除)
             dropout_rate (float): Dropout概率
         """
@@ -36,7 +36,7 @@ class GroupQueryAttention(nn.Module):
         
         self.dropout = nn.Dropout(dropout_rate)  # 用于注意力权重的dropout
     
-    def forward(self, x, mask=None):
+    def forward(self, x:torch.Tensor, mask:Optional[torch.Tensor]=None)->torch.Tensor:
         """
         组查询注意力的前向传播
         
