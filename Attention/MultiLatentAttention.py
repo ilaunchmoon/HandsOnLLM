@@ -56,7 +56,9 @@ class MulitLatentAttention(nn.Module):
 
         # RMSNorm层相关
         self.q_down_norm = None
+        self.q_up_norm = None
         self.kv_down_norm = None
+        self.kv_up_norm = None
 
     def forward(self, x:torch.Tensor, position:torch.Tensor, mask:Optional[torch.Tensor]=None)->torch.Tensor:
         batch_size, seq_len, _ = x.size()
@@ -77,8 +79,55 @@ class MulitLatentAttention(nn.Module):
         
         # 5. 先将用于位置编码的k部分和用于压缩v和不带位置编码的k部分 分裂出来
         # 注意: 压缩v和不带位置编码的k部分都放在c_kv中, 现在c_kv会去中升维度, 升维后会将其分成不带位置编码k_nope和v
-        # 你可能会为k带位置编码的部分, 按照MLA的图是直接使用x的一部分来做位置编码的, 为什么这里先要将x做一次压缩后，再分裂出一部分来做k的位置编码
+
+        # 你可能会为k带位置编码的部分, 按照MLA的图是直接使用x的一部分来做位置编码的, 为什么这里先要将x做一次压缩后，再分裂出一部分来做k的位置编码？
+        # 其实我一直都没想明白, 但是官方也是这么实现的
         c_kv, k_rope = torch.split(c_kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
+        k_rope = k_rope.view(batch_size, seq_len, 1, self.qk_rope_head_dim).transpose(1, 2)
+
+
+        # 6. 对c_kv进行升维操作, 为分裂v部分和不带位置编码的k_nope部分做准备
+        kv = self.kv_up_proj(c_kv)
+        # kv = self.kv_up_norm(kv)      
+
+        # 7. 升维度后, 对形状进行重塑: ()
+        kv = kv.view(batch_size, seq_len, self.head_nums, self.qk_nope_head_dim + self.v_head_dim).transpose(1,2)
+
+        # 8. 分裂出v和不带位置编码k_nope
+        k_nope, v_state = torch.split(kv, [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+
+        # 9. 对k_rope 和 q_rope进行位置编码
+
+        # 10. 对q_nope和q_rope部分进行concat
+        # 合并之前, 先将q_rope从(batch_size, seq_len, qk_rope_head_dim) 扩展为(batch_size, head_nums, seq_len, qk_rope_head_dim)
+        q_rope = q_rope.expand(-1, self.head_nums, -1, -1)
+        q_state = torch.concat([q_nope, q_rope], dim=-1)
+        
+        # 11. 对k_nope和k_rope部分进行concat
+        k_state = torch.concat([k_nope, k_rope], dim=-1)
+
+
+        # 12. 现在q_state、k_state、v_state都为[batch_size, head_nums, seq_len, head_dim] 其中head_dim = v_head_dim
+        # 那么可以进行注意力得分计算了, 和之前的多头注意力机制计算没有任何区别
+        att_weight = torch.matmul(q_state, k_state.transpose(-2, -1)) / math.sqrt(self.v_head_dim)
+
+        if mask is not None:
+            att_weight = att_weight.masked_fill(mask==0, float('-inf'))
+        
+        att_weight = F.softmax(att_weight, dim=-1)
+
+        att_weight = self.dropout(att_weight)
+
+        att = torch.matmul(att_weight, v_state)
+
+        att = att.transpose(1, 2).contiguous().view(batch_size, seq_len, -1)
+
+        return self.out_proj(att)
+    
+
+
+
+    
 
 
 
