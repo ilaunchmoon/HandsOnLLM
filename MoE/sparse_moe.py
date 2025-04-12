@@ -140,7 +140,7 @@ class SparseMoe(nn.Module):
 
         # 
         output_state = output_state.reshape(batch_size, seq_len, hidden_dim)
-        return output_state, router_logits
+        return output_state, router_logits          # 注意router_logits输出是为了后续做损失函数的
     
 
 
