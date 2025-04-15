@@ -8,7 +8,7 @@ from .basic_moe import BasicExpert
 
 
 # 与最基本Moe区别是, SparseMoe具有共享的若干个专家
-# 并且专家输出后会选择前top_k个
+# 并且专家输出会选择前top_k个
 @dataclass
 class Config:
     hidden_dim:int 
