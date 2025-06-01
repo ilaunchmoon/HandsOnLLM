@@ -361,11 +361,6 @@ class TransformerBlock(nn.Module):
 
 
 
-import torch
-import math
-from typing import Optional, Tuple
-import torch.nn.functional as F
-
 class Transformer(nn.Module):
     def __init__(self, params: Config):
         super().__init__()
